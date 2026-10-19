@@ -1,0 +1,11 @@
+Source: https://github.com/Hybrid-Mount/meta-hybrid_mount
+Commit: 7f88580eb4430c03fca7cb34b44e720b7b812c62
+Directory: module/vfs/src
+
+Local changes: see git history for Linux 4.14 compatibility adaptations.
+Linux 4.14: construct a qstr from the string-only name_snapshot before dentry revalidation.
+Whitespace-only cleanup of the imported sources and integration notes.
+
+Ported from YuzakiKokuban/infinity_cnb_kernel_google_msm-4.14 bakasu
+at ebced31c7 (Pixel 4 Linux 4.14 adaptation).
+Kconfig: require KEYS and default off outside explicit device configurations.

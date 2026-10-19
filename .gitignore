@@ -135,3 +135,10 @@ kernel/configs/android-*.cfg
 #Ignoring Android.bp link file
 #
 Android.bp
+
+# BakaSU is fetched at build time; do not commit a gitlink.
+/KernelSU/
+/drivers/kernelsu
+
+# Central CI build trigger.
+!/.github/
