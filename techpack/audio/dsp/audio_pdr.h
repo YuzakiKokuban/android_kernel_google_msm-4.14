@@ -27,9 +27,8 @@ enum {
 #ifdef CONFIG_MSM_QDSP6_PDR
 
 /*
- * Use audio_pdr_register to register with the PDR subsystem this
- * should be done before module late init otherwise notification
- * of the AUDIO_PDR_FRAMEWORK_UP cannot be guaranteed.
+ * Register with the PDR subsystem. Late subscribers receive the latest
+ * known framework state before registration returns.
  *
  * *nb - Pointer to a notifier block. Provide a callback function
  *       to be notified once the PDR framework has been initialized.

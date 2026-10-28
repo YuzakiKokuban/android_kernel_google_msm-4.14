@@ -52,10 +52,28 @@ A later move to 5.10+ should preserve this release naming convention while
 separately adapting and testing the build profile, hooks, drivers, and boot
 format. This change does not implement that kernel migration.
 
-CI packages Image.lz4 for the current A/B slot and retains the ROM's DTB,
-DTBO, ramdisk and modules. Building is not a device boot test: validate
-module ABI, boot, touch, Wi-Fi, BakaSU authorization and Hybrid Mount before
-using a release on a daily device.
+Wi-Fi, the SM8150 audio stack, Incremental FS and the MSM 11ad proxy are
+built into Image.lz4. The unused software watchdog is disabled. The static
+WLAN init registers its PLD driver; ICNSS defers probing until firmware is
+ready. No userspace boot_wlan trigger is required.
+
+CI packages only Image.lz4 for the current A/B slot and retains the ROM's
+DTB, DTBO and ramdisk. It requires an empty modules.order, built-in WLAN
+and filesystem entries, linked audio initcalls, do.modules=0 and no .ko
+payload. No KernelSU module, vendor write, /data module bundle or startup
+script is required for these drivers. BakaSU's root functionality still
+needs userspace matching the kernel UAPI.
+
+PDR registration replays the latest known framework state to late audio
+subscribers. Run scripts/tests/pixel4-audio-pdr.py (five cases) and
+scripts/tests/pixel4-builtin-wlan.py (three cases); CI runs both before
+compiling this profile.
+
+A temporary all-built-in test image booted on Pixel 4 on 2026-10-28 with
+an empty /proc/modules, automatic WLAN association/IP configuration and
+registration of sm8150-iaxxx-flame-snd-card, after removing the previous
+external module loader. Audible playback was not verified. Validate
+boot, touch, Wi-Fi, playback, root and Hybrid Mount before daily use.
 
 ## Focused host regression
 
