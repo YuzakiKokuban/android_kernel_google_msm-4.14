@@ -1355,7 +1355,7 @@ static int pac193x_reg_snapshot(struct pac193x_chip_info *chip_info,
 			goto reg_snapshot_err;
 		}
 	}
-	tstamp_ms = ktime_get_boot_ns()/1000000;
+	tstamp_ms = ktime_get_boottime_ns()/1000000;
 	/* read the ctrl/status registers for this snapshot */
 	ret = pac193x_i2c_read(chip_info->client, PAC193X_CTRL_STAT_REGS_ADDR,
 			       (u8 *) chip_info->chip_reg_data.ctrl_regs,
