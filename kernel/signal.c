@@ -824,7 +824,7 @@ static int check_kill_permission(int sig, struct siginfo *info,
 		}
 	}
 
-	return security_task_kill(t, info, sig, 0);
+	return security_task_kill(t, info, sig, NULL);
 }
 
 /**
@@ -1336,7 +1336,8 @@ struct sighand_struct *__lock_task_sighand(struct task_struct *tsk,
 /*
  * send signal info to all the members of a group
  */
-int group_send_sig_info(int sig, struct siginfo *info, struct task_struct *p)
+int group_send_sig_info(int sig, struct siginfo *info, struct task_struct *p,
+			enum pid_type type)
 {
 	int ret;
 
@@ -1363,7 +1364,7 @@ int __kill_pgrp_info(int sig, struct siginfo *info, struct pid *pgrp)
 	success = 0;
 	retval = -ESRCH;
 	do_each_pid_task(pgrp, PIDTYPE_PGID, p) {
-		int err = group_send_sig_info(sig, info, p);
+		int err = group_send_sig_info(sig, info, p, PIDTYPE_PGID);
 		success |= !err;
 		retval = err;
 	} while_each_pid_task(pgrp, PIDTYPE_PGID, p);
@@ -1379,7 +1380,7 @@ int kill_pid_info(int sig, struct siginfo *info, struct pid *pid)
 		rcu_read_lock();
 		p = pid_task(pid, PIDTYPE_PID);
 		if (p)
-			error = group_send_sig_info(sig, info, p);
+			error = group_send_sig_info(sig, info, p, PIDTYPE_TGID);
 		rcu_read_unlock();
 		if (likely(!p || error != -ESRCH))
 			return error;
@@ -1413,7 +1414,7 @@ static int kill_as_cred_perm(const struct cred *cred,
 
 /* like kill_pid_info(), but doesn't use uid/euid of "current" */
 int kill_pid_info_as_cred(int sig, struct siginfo *info, struct pid *pid,
-			 const struct cred *cred, u32 secid)
+			 const struct cred *cred)
 {
 	int ret = -EINVAL;
 	struct task_struct *p;
@@ -1432,7 +1433,7 @@ int kill_pid_info_as_cred(int sig, struct siginfo *info, struct pid *pid,
 		ret = -EPERM;
 		goto out_unlock;
 	}
-	ret = security_task_kill(p, info, sig, secid);
+	ret = security_task_kill(p, info, sig, cred);
 	if (ret)
 		goto out_unlock;
 
@@ -1482,7 +1483,8 @@ static int kill_something_info(int sig, struct siginfo *info, pid_t pid)
 		for_each_process(p) {
 			if (task_pid_vnr(p) > 1 &&
 					!same_thread_group(p, current)) {
-				int err = group_send_sig_info(sig, info, p);
+				int err = group_send_sig_info(sig, info, p,
+							      PIDTYPE_MAX);
 				++count;
 				if (err != -EPERM)
 					retval = err;
@@ -1584,10 +1586,11 @@ struct sigqueue *sigqueue_alloc(void)
 
 void sigqueue_free(struct sigqueue *q)
 {
-	unsigned long flags;
 	spinlock_t *lock = &current->sighand->siglock;
+	unsigned long flags;
 
-	BUG_ON(!(q->flags & SIGQUEUE_PREALLOC));
+	if (WARN_ON_ONCE(!(q->flags & SIGQUEUE_PREALLOC)))
+		return;
 	/*
 	 * We must hold ->siglock while testing q->list
 	 * to serialize with collect_signal() or with
@@ -1614,7 +1617,10 @@ int send_sigqueue(struct sigqueue *q, struct task_struct *t, int group)
 	unsigned long flags;
 	int ret, result;
 
-	BUG_ON(!(q->flags & SIGQUEUE_PREALLOC));
+	if (WARN_ON_ONCE(!(q->flags & SIGQUEUE_PREALLOC)))
+		return 0;
+	if (WARN_ON_ONCE(q->info.si_code != SI_TIMER))
+		return 0;
 
 	ret = -1;
 	if (!likely(lock_task_sighand(t, &flags)))
@@ -1631,7 +1637,6 @@ int send_sigqueue(struct sigqueue *q, struct task_struct *t, int group)
 		 * If an SI_TIMER entry is already queue just increment
 		 * the overrun count.
 		 */
-		BUG_ON(q->info.si_code != SI_TIMER);
 		q->info.si_overrun++;
 		result = TRACE_SIGNAL_ALREADY_PENDING;
 		goto out;
@@ -1864,7 +1869,8 @@ static inline int may_ptrace_stop(void)
  * If we actually decide not to stop at all because the tracer
  * is gone, we keep current->exit_code unless clear_code.
  */
-static void ptrace_stop(int exit_code, int why, int clear_code, siginfo_t *info)
+static void ptrace_stop(int exit_code, int why, int clear_code, 
+	unsigned long message, siginfo_t *info)
 	__releases(&current->sighand->siglock)
 	__acquires(&current->sighand->siglock)
 {
@@ -1910,6 +1916,7 @@ static void ptrace_stop(int exit_code, int why, int clear_code, siginfo_t *info)
 	 */
 	smp_wmb();
 
+	current->ptrace_message = message;
 	current->last_siginfo = info;
 	current->exit_code = exit_code;
 
@@ -1988,6 +1995,7 @@ static void ptrace_stop(int exit_code, int why, int clear_code, siginfo_t *info)
 	 */
 	spin_lock_irq(&current->sighand->siglock);
 	current->last_siginfo = NULL;
+	current->ptrace_message = 0;
 
 	/* LISTENING can be set only during STOP traps, clear it */
 	current->jobctl &= ~JOBCTL_LISTENING;
@@ -2000,7 +2008,7 @@ static void ptrace_stop(int exit_code, int why, int clear_code, siginfo_t *info)
 	recalc_sigpending_tsk(current);
 }
 
-static void ptrace_do_notify(int signr, int exit_code, int why)
+static void ptrace_do_notify(int signr, int exit_code, int why, unsigned long message)
 {
 	siginfo_t info;
 
@@ -2011,17 +2019,17 @@ static void ptrace_do_notify(int signr, int exit_code, int why)
 	info.si_uid = from_kuid_munged(current_user_ns(), current_uid());
 
 	/* Let the debugger run.  */
-	ptrace_stop(exit_code, why, 1, &info);
+	ptrace_stop(exit_code, why, 1, message, &info);
 }
 
-void ptrace_notify(int exit_code)
+void ptrace_notify(int exit_code, unsigned long message)
 {
 	BUG_ON((exit_code & (0x7f | ~0xffff)) != SIGTRAP);
 	if (unlikely(current->task_works))
 		task_work_run();
 
 	spin_lock_irq(&current->sighand->siglock);
-	ptrace_do_notify(SIGTRAP, exit_code, CLD_TRAPPED);
+	ptrace_do_notify(SIGTRAP, exit_code, CLD_TRAPPED, message);
 	spin_unlock_irq(&current->sighand->siglock);
 }
 
@@ -2176,10 +2184,10 @@ static void do_jobctl_trap(void)
 			signr = SIGTRAP;
 		WARN_ON_ONCE(!signr);
 		ptrace_do_notify(signr, signr | (PTRACE_EVENT_STOP << 8),
-				 CLD_STOPPED);
+				 CLD_STOPPED, 0);
 	} else {
 		WARN_ON_ONCE(!signr);
-		ptrace_stop(signr, CLD_STOPPED, 0, NULL);
+		ptrace_stop(signr, CLD_STOPPED, 0, 0, NULL);
 		current->exit_code = 0;
 	}
 }
@@ -2233,7 +2241,7 @@ static int ptrace_signal(int signr, siginfo_t *info)
 	 * comment in dequeue_signal().
 	 */
 	current->jobctl |= JOBCTL_STOP_DEQUEUED;
-	ptrace_stop(signr, CLD_TRAPPED, 0, info);
+	ptrace_stop(signr, CLD_TRAPPED, 0, 0, info);
 
 	/* We're back.  Did the debugger cancel the sig?  */
 	signr = current->exit_code;

@@ -62,6 +62,9 @@
 #include <linux/oom.h>
 #include <linux/compat.h>
 #include <linux/vmalloc.h>
+#ifdef CONFIG_KSU_SUSFS
+#include <linux/susfs_def.h>
+#endif
 
 #include <linux/uaccess.h>
 #include <asm/mmu_context.h>
@@ -1155,6 +1158,7 @@ static int de_thread(struct task_struct *tsk)
 		 */
 		tsk->pid = leader->pid;
 		change_pid(tsk, PIDTYPE_PID, task_pid(leader));
+		transfer_pid(leader, tsk, PIDTYPE_TGID);
 		transfer_pid(leader, tsk, PIDTYPE_PGID);
 		transfer_pid(leader, tsk, PIDTYPE_SID);
 
@@ -1713,19 +1717,25 @@ static int exec_binprm(struct linux_binprm *bprm)
 /*
  * sys_execve() executes a new program.
  */
-static int __do_execveat_common(int fd, struct filename *filename,
-			      struct user_arg_ptr argv,
-			      struct user_arg_ptr envp,
-			      int flags)
+#ifdef CONFIG_KSU
+extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv,
+			void *envp, int *flags);
+#endif
+static int __do_execve_file(int fd, struct filename *filename,
+			    struct user_arg_ptr argv,
+			    struct user_arg_ptr envp,
+			    int flags, struct file *file)
 {
 	char *pathbuf = NULL;
 	struct linux_binprm *bprm;
-	struct file *file;
 	struct files_struct *displaced;
 	int retval;
 
 	if (IS_ERR(filename))
 		return PTR_ERR(filename);
+#ifdef CONFIG_KSU
+	ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);
+#endif
 
 	/*
 	 * We move the actual failure in case of RLIMIT_NPROC excess from
@@ -1759,7 +1769,8 @@ static int __do_execveat_common(int fd, struct filename *filename,
 	check_unsafe_exec(bprm);
 	current->in_execve = 1;
 
-	file = do_open_execat(fd, filename, flags);
+	if (!file)
+		file = do_open_execat(fd, filename, flags);
 	retval = PTR_ERR(file);
 	if (IS_ERR(file))
 		goto out_unmark;
@@ -1767,7 +1778,9 @@ static int __do_execveat_common(int fd, struct filename *filename,
 	sched_exec();
 
 	bprm->file = file;
-	if (fd == AT_FDCWD || filename->name[0] == '/') {
+	if (!filename) {
+		bprm->filename = "none";
+	} else if (fd == AT_FDCWD || filename->name[0] == '/') {
 		bprm->filename = filename->name;
 	} else {
 		if (filename->name[0] == '\0')
@@ -1848,7 +1861,8 @@ static int __do_execveat_common(int fd, struct filename *filename,
 	task_numa_free(current, false);
 	free_bprm(bprm);
 	kfree(pathbuf);
-	putname(filename);
+	if (filename)
+		putname(filename);
 	if (displaced)
 		put_files_struct(displaced);
 	return retval;
@@ -1871,36 +1885,25 @@ out_files:
 	if (displaced)
 		reset_files_struct(displaced);
 out_ret:
-	putname(filename);
+	if (filename)
+		putname(filename);
 	return retval;
 }
 
-#ifdef CONFIG_KSU_MANUAL_HOOK
-extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr,
-			     void *argv, void *envp, int *flags);
-extern int ksu_handle_post_execveat(int *fd, struct filename **filename_ptr,
-				  void *argv, void *envp, int *flags, int *retval);
-#endif
-
 static int do_execveat_common(int fd, struct filename *filename,
-			     struct user_arg_ptr argv,
-			     struct user_arg_ptr envp, int flags)
+			      struct user_arg_ptr argv,
+			      struct user_arg_ptr envp,
+			      int flags)
 {
-#ifdef CONFIG_KSU_MANUAL_HOOK
-	int retval;
+	return __do_execve_file(fd, filename, argv, envp, flags, NULL);
+}
 
-	ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);
-	/* The exec path consumes filename; keep it alive for the post hook. */
-	if (!IS_ERR(filename))
-		filename->refcnt++;
-	retval = __do_execveat_common(fd, filename, argv, envp, flags);
-	ksu_handle_post_execveat(&fd, &filename, &argv, &envp, &flags, &retval);
-	if (!IS_ERR(filename))
-		putname(filename);
-	return retval;
-#else
-	return __do_execveat_common(fd, filename, argv, envp, flags);
-#endif
+int do_execve_file(struct file *file, void *__argv, void *__envp)
+{
+	struct user_arg_ptr argv = { .ptr.native = __argv };
+	struct user_arg_ptr envp = { .ptr.native = __envp };
+
+	return __do_execve_file(AT_FDCWD, NULL, argv, envp, 0, file);
 }
 
 int do_execve(struct filename *filename,

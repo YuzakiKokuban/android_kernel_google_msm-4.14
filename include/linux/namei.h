@@ -7,6 +7,12 @@
 #include <linux/fcntl.h>
 #include <linux/errno.h>
 
+#ifdef CONFIG_KSU_SUSFS
+struct filename;
+extern int filename_lookup(int dfd, struct filename *name, unsigned flags,
+                           struct path *path, struct path *root);
+#endif
+
 enum { MAX_NESTED_LINKS = 8 };
 
 #define MAXSYMLINKS 40

@@ -1,0 +1,13 @@
+{
+  "kernel_source": "7c6f054f7d207e0621bad405d0c1515a3d82beb6",
+  "kernel_base": "aaaa03e40200825133d21402cad8f2a86939a778",
+  "bakasu_source": "603931b9a93b1ee33c522523d03269d405477738",
+  "compiler_revision": "29182889399818f97baa65ea238c80e8117981eb",
+  "compiler": "clang-r596125",
+  "susfs": "2.3.0",
+  "format": "images-and-modules-not-flashable",
+  "dtc_revision": "be7c3a630b5dc5eb3260035d77a81b2f322754f8",
+  "dtc_sha256": "46b5bf79dee40514a4877878ce9a8fd3f2dd0396a16c6f54a9572ae0bf9a7ead",
+  "mkdtimg_revision": "811c6e2938d53b3c318d7635b03931601a68c765",
+  "mkdtimg_sha256": "32ed014e05e653c22f43d53f412041330ea3631e0c376808aaa51a379f0efe8a"
+}

@@ -13511,23 +13511,13 @@ static int hdd_module_init(void)
 #else
 static int __init hdd_module_init(void)
 {
-	int ret;
+	int ret = -EINVAL;
 
 	ret = wlan_init_sysfs();
-	if (ret) {
+	if (ret)
 		hdd_fln("Failed to create sysfs entry");
-		return ret;
-	}
 
-	/* ICNSS probes the registered driver once firmware is ready. */
-	ret = hdd_driver_load();
-	if (ret) {
-		wlan_deinit_sysfs();
-		return ret;
-	}
-	wlan_loader->loaded_state = MODULE_INITIALIZED;
-
-	return 0;
+	return ret;
 }
 #endif
 
