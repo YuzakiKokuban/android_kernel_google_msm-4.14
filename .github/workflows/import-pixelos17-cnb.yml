@@ -1,0 +1,33 @@
+name: Import verified PixelOS 17 kernel source
+on:
+  push:
+    branches: [pixelos17-cnb-import]
+    paths: [.github/workflows/import-pixelos17-cnb.yml]
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: bakasu
+          fetch-depth: 1
+      - name: Import checksum-pinned source without rewriting history
+        env:
+          SOURCE_URL: https://argue-tissue-wishlist-surplus.trycloudflare.com/TTDt3mgEeEXXHohh4PWvWbmdVa6L6YrY/kernel-source-1111.tar.gz
+          SOURCE_SHA256: b514cdae528755b3827be71b73f766e95cfe8b197d17c9991724c50c957c6261
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 9bf1df6e86457bf38266d0b1e42e2f49769b65f0
+          archive="$RUNNER_TEMP/pixelos17-kernel.tar.gz"
+          curl --fail --location --retry 5 "$SOURCE_URL" --output "$archive"
+          printf '%s  %s\n' "$SOURCE_SHA256" "$archive" | sha256sum --check
+          git rm -r . > /dev/null
+          tar -xzf "$archive"
+          PYTHONDONTWRITEBYTECODE=1 python3 ci/test_build.py
+          git add --force --all .
+          test "$(git write-tree)" = 512717c6518dfdaabc4c7d437f402c017a817721
+          git -c user.name='GitHub Actions' -c user.email='actions@github.com' commit --quiet -m 'flame: publish PixelOS 17 CNB 4.14.357, BakaSU and SUSFS [skip ci]'
+          git push origin HEAD:refs/heads/bakasu
+          git rev-parse HEAD
