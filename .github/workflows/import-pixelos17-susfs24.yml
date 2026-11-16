@@ -1,0 +1,26 @@
+name: Publish the PixelOS 17 SUSFS 2.4.0 kernel
+on:
+  push:
+    branches: [pixelos17-susfs24-import]
+    paths: [.github/workflows/import-pixelos17-susfs24.yml]
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: bakasu
+      - name: Apply and verify the prepared source diff
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 126188c1ab0d6852112b2879f6a5515639633388
+          git fetch --depth=1 origin "$GITHUB_SHA"
+          git show FETCH_HEAD:pixelos17-susfs24.patch > "$RUNNER_TEMP/flame-susfs24.patch"
+          printf '%s  %s\n' 16b9955ac8ee1254b90fe4d8809635227032e90d063c8655d571b3f978e765de "$RUNNER_TEMP/flame-susfs24.patch" | sha256sum --check
+          git apply --index "$RUNNER_TEMP/flame-susfs24.patch"
+          test "$(git write-tree)" = 610b47a5b526d5159c31348477075298b4c8aee3
+          PYTHONDONTWRITEBYTECODE=1 python3 ci/test_build.py
+          git -c user.name='GitHub Actions' -c user.email='actions@github.com' commit -qm 'flame: sync ROM BakaSU and backport SUSFS 2.4.0 [skip ci]'
+          git push origin HEAD:refs/heads/bakasu
