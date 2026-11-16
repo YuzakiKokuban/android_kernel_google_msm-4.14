@@ -4969,6 +4969,10 @@ int vfs_rename(struct inode *old_dir, struct dentry *old_dentry,
 }
 EXPORT_SYMBOL(vfs_rename);
 
+#ifdef CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER
+extern void susfs_parse_priority_app_strings(void);
+#endif
+
 SYSCALL_DEFINE5(renameat2, int, olddfd, const char __user *, oldname,
 		int, newdfd, const char __user *, newname, unsigned int, flags)
 {
@@ -4982,6 +4986,9 @@ SYSCALL_DEFINE5(renameat2, int, olddfd, const char __user *, oldname,
 	struct filename *to;
 	unsigned int lookup_flags = 0, target_flags = LOOKUP_RENAME_TARGET;
 	bool should_retry = false;
+#ifdef CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER
+	bool refresh_priority_uids;
+#endif
 	int error;
 
 	if (flags & ~(RENAME_NOREPLACE | RENAME_EXCHANGE | RENAME_WHITEOUT))
@@ -5080,9 +5087,24 @@ retry_deleg:
 				     &new_path, new_dentry, flags);
 	if (error)
 		goto exit5;
+#ifdef CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER
+	refresh_priority_uids = false;
+	if (current_uid().val == 1000 && !strcmp(new_dentry->d_name.name, "packages.list")) {
+		struct path target_path = { .mnt = new_path.mnt, .dentry = new_dentry };
+		char buf[64];
+		char *target_name = d_path(&target_path, buf, sizeof(buf));
+
+		refresh_priority_uids = !IS_ERR(target_name) &&
+			!strcmp(target_name, "/data/system/packages.list");
+	}
+#endif
 	error = vfs_rename2(old_path.mnt, old_path.dentry->d_inode, old_dentry,
 			   new_path.dentry->d_inode, new_dentry,
 			   &delegated_inode, flags);
+#ifdef CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER
+	if (!error && refresh_priority_uids)
+		susfs_parse_priority_app_strings();
+#endif
 exit5:
 	dput(new_dentry);
 exit4:
