@@ -4,6 +4,7 @@ import argparse
 import base64
 import hashlib
 import json
+import mmap
 import os
 from pathlib import Path
 import shutil
@@ -124,6 +125,17 @@ def main():
         raise ValueError('Missing base DTBs')
     (out / 'arch/arm64/boot/dtb.img').write_bytes(b''.join(path.read_bytes() for path in dtbs))
     release = validate(out)
+    provenance = json.loads((source / 'ci/pixelos17.json').read_text())
+    provenance['checkout_commit'] = subprocess.check_output(
+        ['git', '-C', str(source), 'rev-parse', 'HEAD'], text=True).strip()
+    config = (out / '.config').read_text().splitlines()
+    if 'CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER=y' not in config:
+        raise ValueError('SUSFS 2.4 priority UID filter is disabled')
+    with (out / 'vmlinux').open('rb') as binary, mmap.mmap(binary.fileno(), 0, access=mmap.ACCESS_READ) as image:
+        version = ('v' + provenance['susfs']).encode() + b'\0'
+        if image.find(version) < 0:
+            raise ValueError('SUSFS version missing from linked kernel')
+    print('Kernel checkout: ' + provenance['checkout_commit'], flush=True)
     args.artifact_dir.mkdir(parents=True, exist_ok=True)
     dest = args.artifact_dir.resolve() / ('Pixel4_Kernel-' + release + '-images-modules.zip')
     files = {name: out / name for name in ('.config', 'System.map', 'Module.symvers', 'include/config/kernel.release')}
@@ -135,7 +147,7 @@ def main():
     with zipfile.ZipFile(dest, 'w', zipfile.ZIP_DEFLATED) as z:
         for name, path in files.items():
             z.write(path, name)
-        z.write(source / 'ci/pixelos17.json', 'source-provenance.json')
+        z.writestr('source-provenance.json', json.dumps(provenance, indent=2) + '\n')
         z.writestr('SHA256SUMS', sums)
         z.writestr('README.txt', 'Pixel 4 PixelOS 17 kernel build outputs.\nThis is NOT a recovery-flashable AnyKernel ZIP.\nUse the matching ROM device tree to package boot and its vendor modules.\n')
     with zipfile.ZipFile(dest) as z:

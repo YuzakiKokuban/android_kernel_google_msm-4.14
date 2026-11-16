@@ -1,6 +1,6 @@
 # PixelOS 17 flame kernel source
 
-This is the kernel from PixelOS flame 20261107-1111: CNB 4.14.357 + BakaSU + SUSFS 2.3. The original kernel and BakaSU commits are recorded in pixelos17.json. BakaSU is vendored, including its out-of-tree UAPI headers fix; source-version.mk preserves the original driver identity without requiring an unpublished submodule commit.
+This kernel is shared by the PixelOS 17 flame ROM and CI Center. It uses CNB 4.14.357, the BakaSU revision from the 20261109 ROM, and the SUSFS 2.4.0 priority UID filter backported from the Android 12 / 5.10 upstream. The kernel retains BakaSU’s existing SELinux compatibility on 4.14. The original kernel and BakaSU commits are recorded in pixelos17.json. BakaSU is vendored, including its out-of-tree UAPI headers fix; source-version.mk preserves the original driver identity without requiring an unpublished submodule commit.
 
 Build on Ubuntu 24.04 x86_64:
 
