@@ -1,0 +1,373 @@
+diff --git a/KernelSU/kernel/manager/throne_tracker.c b/KernelSU/kernel/manager/throne_tracker.c
+index fcd038ed2402..d487fc8d60a3 100644
+--- a/KernelSU/kernel/manager/throne_tracker.c
++++ b/KernelSU/kernel/manager/throne_tracker.c
+@@ -10,9 +10,6 @@
+ #include <linux/version.h>
+ #include <linux/stat.h>
+ #include <linux/namei.h>
+-#ifdef CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER
+-#include <linux/susfs.h>
+-#endif
+ #include <linux/kernel.h> // for container_of in UL
+ 
+ #include "policy/allowlist.h"
+@@ -424,9 +421,6 @@ void ksu_handle_rename(struct dentry *old_dentry, struct dentry *new_dentry)
+     // and user install an new app before task_work executed
+     // ^ race here
+     track_throne(TRACK_THRONE_FROM_RENAMEAT | TRACK_THRONE_FORCE_SYNCHRONOUS);
+-#ifdef CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER
+-    susfs_parse_priority_app_strings();
+-#endif
+ }
+ #endif
+ 
+diff --git a/fs/namei.c b/fs/namei.c
+index 87f7bf837d21..30ca3090f607 100644
+--- a/fs/namei.c
++++ b/fs/namei.c
+@@ -4969,6 +4969,10 @@ int vfs_rename(struct inode *old_dir, struct dentry *old_dentry,
+ }
+ EXPORT_SYMBOL(vfs_rename);
+ 
++#ifdef CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER
++extern void susfs_parse_priority_app_strings(void);
++#endif
++
+ SYSCALL_DEFINE5(renameat2, int, olddfd, const char __user *, oldname,
+ 		int, newdfd, const char __user *, newname, unsigned int, flags)
+ {
+@@ -4982,6 +4986,9 @@ SYSCALL_DEFINE5(renameat2, int, olddfd, const char __user *, oldname,
+ 	struct filename *to;
+ 	unsigned int lookup_flags = 0, target_flags = LOOKUP_RENAME_TARGET;
+ 	bool should_retry = false;
++#ifdef CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER
++	bool refresh_priority_uids;
++#endif
+ 	int error;
+ 
+ 	if (flags & ~(RENAME_NOREPLACE | RENAME_EXCHANGE | RENAME_WHITEOUT))
+@@ -5080,9 +5087,24 @@ SYSCALL_DEFINE5(renameat2, int, olddfd, const char __user *, oldname,
+ 				     &new_path, new_dentry, flags);
+ 	if (error)
+ 		goto exit5;
++#ifdef CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER
++	refresh_priority_uids = false;
++	if (current_uid().val == 1000 && !strcmp(new_dentry->d_name.name, "packages.list")) {
++		struct path target_path = { .mnt = new_path.mnt, .dentry = new_dentry };
++		char buf[64];
++		char *target_name = d_path(&target_path, buf, sizeof(buf));
++
++		refresh_priority_uids = !IS_ERR(target_name) &&
++			!strcmp(target_name, "/data/system/packages.list");
++	}
++#endif
+ 	error = vfs_rename2(old_path.mnt, old_path.dentry->d_inode, old_dentry,
+ 			   new_path.dentry->d_inode, new_dentry,
+ 			   &delegated_inode, flags);
++#ifdef CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER
++	if (!error && refresh_priority_uids)
++		susfs_parse_priority_app_strings();
++#endif
+ exit5:
+ 	dput(new_dentry);
+ exit4:
+diff --git a/fs/susfs.c b/fs/susfs.c
+index b657e2948e0f..6f5d8c8add45 100644
+--- a/fs/susfs.c
++++ b/fs/susfs.c
+@@ -49,7 +49,7 @@ DEFINE_STATIC_KEY_TRUE(susfs_is_log_enabled);
+  * that the data paths of the apps can be accessed despite of the selinux
+  * restrictions.
+  * The original credentials are returned, they have to be restored with
+- * susfs_restore_creds() afterwards.
++ * revert_creds() afterwards.
+  * Returns the original credentials on success, NULL on failure.
+  */
+ static const struct cred *susfs_switch_to_ksu_domain(void)
+@@ -1190,7 +1190,6 @@ static DEFINE_MUTEX(susfs_mutex_lock_priority_uid_filter);
+ static char *susfs_priority_app_strings;
+ static unsigned long susfs_priority_filter_generation;
+ /* Ensures that there is only one resolving thread running at the same time */
+-static atomic_t susfs_priority_app_strings_running = ATOMIC_INIT(0);
+ 
+ /*
+  * Checks whether the given string is a valid app package name.
+@@ -1221,151 +1220,101 @@ static bool susfs_is_valid_app_name(const char *app_name) {
+  * Resolves the uid of the given app package name from /data/system/packages.list.
+  * Returns 0 on success, a negative errno on failure.
+  */
+-static int susfs_resolve_priority_app_uid(const char *app_name, uid_t *uid) {
++static char *susfs_read_package_list(void)
++{
+ 	struct file *fp;
+-	char *buf = NULL;
+-	char *line, *tmp, *p;
+-	char *pkg_name, *uid_str;
+ 	loff_t pos = 0;
+-	size_t size;
+-	unsigned long val;
+-	int ret = -ENOENT;
+-
+-	if (!app_name || !*app_name || !uid)
+-		return -EINVAL;
+-
+-	if (!susfs_is_valid_app_name(app_name))
+-		return -EINVAL;
++	loff_t size;
++	char *buf;
++	ssize_t ret;
+ 
+ 	fp = filp_open("/data/system/packages.list", O_RDONLY | O_NOATIME, 0);
+-	if (IS_ERR(fp)) {
+-		ret = PTR_ERR(fp);
+-		SUSFS_LOGE("failed to open /data/system/packages.list: %d\n", ret);
+-		return ret;
+-	}
+-
++	if (IS_ERR(fp))
++		return ERR_CAST(fp);
+ 	size = i_size_read(file_inode(fp));
+-	if (size <= 0 || size > (4 * 1024 * 1024)) {
++	if (size <= 0 || size > 4 * 1024 * 1024) {
+ 		filp_close(fp, NULL);
+-		return -EFBIG;
++		return ERR_PTR(-EFBIG);
+ 	}
+-
+ 	buf = vmalloc(size + 1);
+ 	if (!buf) {
+ 		filp_close(fp, NULL);
+-		return -ENOMEM;
++		return ERR_PTR(-ENOMEM);
+ 	}
+-	buf[size] = '\0';
+-
+ 	ret = kernel_read(fp, buf, size, &pos);
+ 	filp_close(fp, NULL);
+-	if (ret != (int)size) {
++	if (ret != size) {
+ 		vfree(buf);
+-		return -EIO;
++		return ERR_PTR(ret < 0 ? ret : -EIO);
+ 	}
++	buf[size] = '\0';
++	return buf;
++}
+ 
+-	line = buf;
+-	while (line && *line) {
+-		p = strchr(line, '\n');
+-		if (p) {
+-			*p = '\0';
+-			tmp = p + 1;
+-		} else {
+-			tmp = NULL;
+-		}
+-
+-		/* skip empty lines */
+-		if (*line == '\0' || *line == '\r') {
+-			line = tmp;
+-			continue;
+-		}
+-
+-		/* packages.list format: <package> <uid> <gid> ... */
+-		pkg_name = strsep(&line, " \t");
+-		if (!pkg_name || *pkg_name == '\0') {
+-			line = tmp;
+-			continue;
+-		}
+-
+-		uid_str = strsep(&line, " \t");
+-		if (!uid_str || *uid_str == '\0') {
+-			line = tmp;
+-			continue;
+-		}
+-
+-		if (!strcmp(pkg_name, app_name)) {
+-			if (kstrtoul(uid_str, 10, &val)) {
+-				vfree(buf);
++static int susfs_resolve_priority_app_uid(const char *packages, const char *app, uid_t *uid)
++{
++	size_t app_len = strlen(app);
++	const char *line = packages;
++
++	while (*line) {
++		const char *end = strchrnul(line, '\n');
++
++		if (end - line > app_len && !memcmp(line, app, app_len) &&
++		    (line[app_len] == ' ' || line[app_len] == '\t')) {
++			const char *value = skip_spaces(line + app_len);
++			size_t len = strspn(value, "0123456789");
++			char number[12];
++			unsigned int val;
++
++			if (value >= end || !len || len >= sizeof(number) ||
++			    value + len > end ||
++			    (value + len < end && value[len] != ' ' && value[len] != '\t'))
+ 				return -EINVAL;
+-			}
+-
+-			*uid = (uid_t)val % 100000;
+-
+-			vfree(buf);
+-
+-			if (*uid < SUSFS_PRIORITY_UID_FILTER_MIN_UID ||
+-			    *uid > SUSFS_PRIORITY_UID_FILTER_MAX_UID)
++			memcpy(number, value, len);
++			number[len] = '\0';
++			if (kstrtouint(number, 10, &val))
+ 				return -EINVAL;
+-
++			*uid = val % 100000;
+ 			return 0;
+ 		}
+-
+-		line = tmp;
++		line = *end ? end + 1 : end;
+ 	}
+-
+-	vfree(buf);
+ 	return -ENOENT;
+ }
+ 
+-/*
+- * Parses the comma separated list of the app package names, resolves the uid
+- * of every app and maps the uids into the given bitmap.
+- *
+- * The spaces before and after the commas are ignored.
+- * The given string is modified while it is being parsed.
+- * If 'skip_failed' is true, the apps whose data path cannot be found are
+- * skipped (they are uninstalled already), otherwise an error is returned.
+- * Returns 0 on success, a negative errno on failure.
+- */
+-static int susfs_parse_priority_app_names(char *app_str, unsigned long *bits, bool skip_failed) {
+-	char *token = NULL;
+-	char *saveptr = app_str;
+-	uid_t uid = 0;
+-	int ret;
++static int susfs_parse_priority_app_names(char *apps, unsigned long *bits)
++{
++	char *packages = susfs_read_package_list();
++	char *token;
++	int ret = 0;
++
++	if (IS_ERR(packages))
++		return PTR_ERR(packages);
++
++	while ((token = strsep(&apps, ",")) != NULL) {
++		uid_t uid;
++		int lookup;
+ 
+-	while ((token = strsep(&saveptr, ",")) != NULL) {
+ 		token = strim(token);
+-		if (*token == '\0') {
+-			/* tolerate the empty items, e.g., "com.foo,,com.bar" */
++		if (!*token)
+ 			continue;
+-		}
+-
+ 		if (!susfs_is_valid_app_name(token)) {
+-			SUSFS_LOGE("invalid app name '%s'\n", token);
+-			return -EINVAL;
+-		}
+-
+-		ret = susfs_resolve_priority_app_uid(token, &uid);
+-		if (ret) {
+-			if (skip_failed)
+-				continue;
+-			return ret;
++			ret = -EINVAL;
++			break;
+ 		}
+-
+-		if (uid < SUSFS_PRIORITY_UID_FILTER_MIN_UID || uid > SUSFS_PRIORITY_UID_FILTER_MAX_UID) {
+-			SUSFS_LOGE("the uid %u of the app '%s' is out of the allowed range [%d, %d]\n",
+-					uid, token, SUSFS_PRIORITY_UID_FILTER_MIN_UID,
+-					SUSFS_PRIORITY_UID_FILTER_MAX_UID);
+-			if (!skip_failed)
+-				return -EINVAL;
++		lookup = susfs_resolve_priority_app_uid(packages, token, &uid);
++		if (lookup == -ENOENT)
+ 			continue;
++		if (lookup) {
++			ret = lookup;
++			break;
+ 		}
+-
+-		set_bit(uid - SUSFS_PRIORITY_UID_FILTER_MIN_UID, bits);
+-		SUSFS_LOGI("app_name '%s', uid '%u' is now added to priority_uid_filter_bitmap\n", token, uid);
++		if (uid >= SUSFS_PRIORITY_UID_FILTER_MIN_UID &&
++		    uid <= SUSFS_PRIORITY_UID_FILTER_MAX_UID)
++			set_bit(uid - SUSFS_PRIORITY_UID_FILTER_MIN_UID, bits);
+ 	}
+-
+-	return 0;
++	vfree(packages);
++	return ret;
+ }
+ 
+ void susfs_set_priority_uid_filter(void __user **user_info) {
+@@ -1434,7 +1383,7 @@ void susfs_set_priority_uid_filter(void __user **user_info) {
+ 
+ 	if (is_uid_filter_set_before)
+ 		SUSFS_LOGI("renewing the priority uid filter\n");
+-	err = susfs_parse_priority_app_names(info->app_strings, new_bitmap->bits, true);
++	err = susfs_parse_priority_app_names(info->app_strings, new_bitmap->bits);
+ 
+ 	revert_creds(orig_cred);
+ 	orig_cred = NULL;
+@@ -1481,11 +1430,12 @@ void susfs_set_priority_uid_filter(void __user **user_info) {
+ }
+ 
+ /*
+- * The thread that resolves the uids of the stored app package names again,
++ * Re-resolve the uids of the stored app package names again,
+  * so that the filter stays up to date when the apps are installed or
+  * uninstalled, because the uid of an app changes when it is reinstalled.
+  */
+-static int susfs_priority_app_strings_worker(void *data) {
++static void susfs_priority_app_strings_worker(struct work_struct *work)
++{
+ 	struct susfs_priority_uid_filter_bitmap *new_bitmap = NULL;
+ 	struct susfs_priority_uid_filter_bitmap *old_bitmap = NULL;
+ 	const struct cred *orig_cred = NULL;
+@@ -1522,7 +1472,7 @@ static int susfs_priority_app_strings_worker(void *data) {
+ 		goto out_restore_creds;
+ 
+ 	/* the apps that are uninstalled already are skipped */
+-	ret = susfs_parse_priority_app_names(app_strings, new_bitmap->bits, true);
++	ret = susfs_parse_priority_app_names(app_strings, new_bitmap->bits);
+ 	if (ret)
+ 		goto out_restore_creds;
+ 
+@@ -1552,25 +1502,13 @@ static int susfs_priority_app_strings_worker(void *data) {
+ 		kfree(new_bitmap);
+ 	if (app_strings)
+ 		kvfree(app_strings);
+-	atomic_set(&susfs_priority_app_strings_running, 0);
+-
+-	return ret;
+ }
+ 
+-/*
+- * Resolves the uids of the stored app package names again in a new thread,
+- * because the resolving of the uids requires the KernelSU selinux domain,
+- * which must not be applied to the calling process.
+- */
+-void susfs_parse_priority_app_strings(void) {
+-	/* do not spawn a new thread if there is already one running */
+-	if (atomic_cmpxchg(&susfs_priority_app_strings_running, 0, 1))
+-		return;
++static DECLARE_WORK(susfs_priority_refresh, susfs_priority_app_strings_worker);
+ 
+-	if (IS_ERR(kthread_run(susfs_priority_app_strings_worker, NULL, "susfs_gpsp_appstr"))) {
+-		atomic_set(&susfs_priority_app_strings_running, 0);
+-		SUSFS_LOGE("failed to create the thread susfs_priority_app_strings\n");
+-	}
++void susfs_parse_priority_app_strings(void)
++{
++	schedule_work(&susfs_priority_refresh);
+ }
+ 
+ /*
